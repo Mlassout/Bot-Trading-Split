@@ -1,0 +1,17 @@
+# Etape 1 - Environnement de marche
+gymnasium>=0.29.0
+pandas>=2.0.0
+numpy>=1.26.0
+
+# Etape 2 - Trader RL
+stable-baselines3>=2.3.0
+torch>=2.2.0
+
+# Etape 3 - Analyst LLM
+openai>=1.0.0          # compatible Mistral, OpenAI, et tout endpoint OpenAI-like
+requests>=2.31.0
+
+# Utilitaires
+matplotlib>=3.8.0
+pytest>=8.0.0
+python-dotenv>=1.0.0
