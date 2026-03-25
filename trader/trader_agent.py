@@ -13,19 +13,59 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import io
+import json
+import base64
+import pickle
+import zipfile
 import numpy as np
 import logging
 from pathlib import Path
 from typing import Optional
 
+import torch
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+import gymnasium as gym
+from gymnasium import spaces
 
 logger = logging.getLogger(__name__)
 
 MODELS_DIR = Path(__file__).parent.parent / "models"
 
 ACTION_NAMES = {0: "HOLD", 1: "BUY", 2: "SELL"}
+
+
+def _load_ppo_safe(model_path: Path) -> PPO:
+    """
+    Charge un modele PPO depuis un .zip en contournant PPO.load() qui segfault
+    sur Python 3.13 (optimizer pickle cross-platform).
+    Charge directement les poids policy.pth avec torch.load().
+    """
+    class _Env(gym.Env):
+        def __init__(self, obs_dim, n_actions):
+            self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
+            self.action_space = spaces.Discrete(n_actions)
+        def reset(self, **kw): return np.zeros(self.observation_space.shape, dtype=np.float32), {}
+        def step(self, a): return np.zeros(self.observation_space.shape, dtype=np.float32), 0.0, True, False, {}
+
+    with zipfile.ZipFile(str(model_path)) as z:
+        data = json.loads(z.read("data"))
+        policy_weights = torch.load(io.BytesIO(z.read("policy.pth")), map_location="cpu", weights_only=True)
+
+    obs_space  = pickle.loads(base64.b64decode(data["observation_space"][":serialized:"]))
+    act_space  = pickle.loads(base64.b64decode(data["action_space"][":serialized:"]))
+    policy_kwargs = pickle.loads(base64.b64decode(data["policy_kwargs"][":serialized:"]))
+
+    obs_dim   = obs_space.shape[0]
+    n_actions = act_space.n
+
+    env = DummyVecEnv([lambda: _Env(obs_dim, n_actions)])
+    model = PPO("MlpPolicy", env, policy_kwargs=policy_kwargs, verbose=0)
+    model.policy.load_state_dict(policy_weights)
+    model.policy.set_training_mode(False)
+    logger.info(f"[TraderAgent] Poids charges via torch.load (Python 3.13 compat)")
+    return model
 
 
 class TraderAgent:
@@ -70,7 +110,7 @@ class TraderAgent:
             raise FileNotFoundError(f"Modele introuvable : {model_path}")
 
         logger.info(f"[TraderAgent] Chargement du modele : {model_path}")
-        model = PPO.load(str(model_path))
+        model = _load_ppo_safe(model_path)
 
         vec_normalize = None
         if vecnorm_path and Path(vecnorm_path).exists():
