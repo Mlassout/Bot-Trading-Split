@@ -156,7 +156,25 @@ Pour utiliser le mode API : `ollama serve` doit tourner, et `ollama pull llama3.
 | #2 | 103 | ~200k | 6 actifs réels, divergence rapide |
 | #3 | 103→105 | 1M | Reward sparse → divergence à 180k steps, best à 50-100k |
 | #4 | 105 | 950k | Reward dense, mais code changé en cours → archivé |
-| #5 | **107** | En cours | Log-norm + volatilité + last_action + hyper améliorés |
+| #5 | **107** | 500k | Best eval à 200k steps (return +3.03%, Sharpe -0.169, 10/30 actifs profitables) |
+
+## Meilleur modèle actuel (Run #5)
+
+- **Checkpoint** : `models/checkpoints/trader_ppo_200000_steps.zip` → copié dans `models/best/best_model.zip`
+- **VecNormalize** : `models/trader_ppo_vecnorm.pkl`
+- **Évaluation out-of-sample** : return moyen +3.03%, Sharpe -0.169, 10/30 actifs profitables
+- **Graphiques** : `evaluation/plots/` (heatmap_returns, metrics_progression, ranking_Xk)
+- Pattern confirmé : le modèle surapprentit après 300k steps — best toujours tôt (200-250k)
+
+## Bugs corrigés (session 2026-03-25)
+
+| Fichier | Bug | Fix |
+|---|---|---|
+| `structurer/structurer.py` | NEUTRAL n'autorisait pas BUY → 0 trades | `[0, 2]` → `[0, 1, 2]` pour neutral |
+| `risk_manager/risk_manager.py` | `reset_daily()` ne remettait pas `_peak_value` → halt permanent | Reset aussi `_peak_value` et `_consecutive_losses` |
+| `orchestrator/orchestrator.py` | `reset_daily()` jamais appelé → halt définitif dès 1er drawdown | Appel toutes les 78 steps |
+| `orchestrator/orchestrator.py` | Discord 429 : notif HALT envoyée à chaque step | Déduplication avec `_last_halt_notified` |
+| `orchestrator/orchestrator.py` | Seuils trop serrés pour données synthétiques | stop_loss/daily_loss 2%→5%, drawdown 10%→20% |
 
 ## État d'avancement
 
@@ -168,8 +186,10 @@ Pour utiliser le mode API : `ollama serve` doit tourner, et `ollama pull llama3.
 - [x] Notifications Discord
 - [x] Vraies news financières (yfinance)
 - [x] Améliorations FinRL/ElegantRL (log-norm, volatilité, last_action, hypers)
-- [ ] Entraînement Run #5 (obs=107) — à lancer
-- [ ] Évaluation Run #5 et comparaison avec runs précédents
+- [x] Entraînement Run #5 (obs=107, 500k steps)
+- [x] Évaluation Run #5 — best checkpoint 200k, graphiques générés
+- [x] Bugs paper trading corrigés (structurer, risk manager, orchestrateur)
+- [ ] Valider paper trading end-to-end sans risk overrides excessifs
 - [ ] Connexion courtier réel paper trading (Alpaca, IBKR)
 
 ## Points d'attention
@@ -180,3 +200,4 @@ Pour utiliser le mode API : `ollama serve` doit tourner, et `ollama pull llama3.
 - **obs size** : changer `window_size` ou les features invalide TOUS les modèles existants
 - **VecNormalize** : modèle + vecnorm doivent toujours être du même run d'entraînement
 - **NaN guard** : `_get_observation()` applique `nan_to_num` en sortie — ne pas retirer
+- **reset_daily** : le `_peak_value` est remis au niveau du portefeuille courant → drawdown = limite journalière, pas de session

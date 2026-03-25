@@ -214,9 +214,12 @@ class RiskManager:
         """
         A appeler au debut de chaque nouvelle journee de trading.
         Reinitialise les compteurs journaliers et leve le halt si applicable.
+        Le peak est remis au niveau actuel : max_drawdown_pct est une limite journaliere.
         """
         self._daily_start_value = portfolio_value
+        self._peak_value = portfolio_value  # drawdown repart de zero chaque jour
         self._halted = False
+        self._consecutive_losses = 0
         logger.info(f"[RiskManager] Reset journalier. Portefeuille: {portfolio_value:.2f}")
 
     def reset(self, initial_capital: Optional[float] = None) -> None:

@@ -103,9 +103,10 @@ class SessionConfig:
     analyst_mode: str = "mock"           # "mock" ou "api"
     model_path: Optional[str] = None     # Chemin vers modele PPO entraine
     data_path: Optional[str] = None      # Chemin vers CSV OHLCV
-    risk_max_drawdown: float = 0.10
-    risk_daily_loss: float = 0.02
-    risk_stop_loss: float = 0.02
+    risk_max_drawdown: float = 0.20
+    risk_daily_loss: float = 0.05
+    risk_stop_loss: float = 0.05
+    trading_day_steps: int = 78      # steps par "journee" (reset_daily du Risk Manager)
     log_to_csv: bool = True
     verbose: bool = True
     discord_webhook: Optional[str] = None   # None = lit DISCORD_WEBHOOK_URL de l'env
@@ -245,9 +246,15 @@ class Orchestrator:
         step = 0
         peak_value = cfg.initial_capital
         prev_position = 0
+        _last_halt_notified = False
 
         while not done:
             step += 1
+
+            # --- Reset journalier du Risk Manager ---
+            if step % cfg.trading_day_steps == 1 and step > 1:
+                pv = self.env._last_portfolio_value
+                self.env.risk_manager.reset_daily(pv)
 
             # --- Mise a jour sentiment (tous les N steps) ---
             if step % cfg.analyst_update_freq == 1:
@@ -300,14 +307,18 @@ class Orchestrator:
                     step=step,
                 )
 
-            # Risk Manager : HALT ou STOP-LOSS
-            if risk_decision == RiskDecision.BLOCK_HALT.value and prev_position == 0:
+            # Risk Manager : HALT ou STOP-LOSS (une seule notif par halt, pas a chaque step)
+            if risk_decision == RiskDecision.BLOCK_HALT.value and not _last_halt_notified:
+                _last_halt_notified = True
                 self.discord.risk_halt(
                     reason=info.get("risk_reason", ""),
                     drawdown_pct=info.get("drawdown_pct", 0.0) * 100,
                     portfolio_value=info["portfolio_value"],
                 )
-            elif risk_decision == RiskDecision.BLOCK_SELL.value and prev_position == 1:
+            elif risk_decision != RiskDecision.BLOCK_HALT.value:
+                _last_halt_notified = False
+
+            if risk_decision == RiskDecision.BLOCK_SELL.value and prev_position == 1:
                 loss_pct = (price - self._last_entry_price) / (self._last_entry_price + 1e-8) * 100
                 self.discord.risk_stop_loss(
                     price=price,

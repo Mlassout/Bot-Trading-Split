@@ -12,7 +12,7 @@ Regles de traduction (exemple institutionnel) :
   ────────────────┼─────────────┼───────────────┼────────────────────┼────────────
   [+0.5, +1.0]   | Fort haussier  | 100%          | HOLD, BUY, SELL    | None
   [+0.2, +0.5[   | Haussier       | 75%           | HOLD, BUY, SELL    | 100 steps
-  [-0.2, +0.2[   | Neutre         | 50%           | HOLD, SELL         | 50 steps
+  [-0.2, +0.2[   | Neutre         | 50%           | HOLD, BUY, SELL    | 50 steps
   [-0.5, -0.2[   | Baissier       | 25%           | HOLD, SELL         | 20 steps
   [-1.0, -0.5[   | Fort baissier  | 0%            | HOLD               | 0 (fermer)
 
@@ -60,7 +60,7 @@ class TradingParams:
 _THRESHOLDS = [
     (+0.50,  "strong_bull", 1.00, [0, 1, 2], None),
     (+0.20,  "bull",        0.75, [0, 1, 2], 100),
-    (-0.20,  "neutral",     0.50, [0, 2],    50),
+    (-0.20,  "neutral",     0.50, [0, 1, 2], 50),
     (-0.50,  "bear",        0.25, [0, 2],    20),
     (-1.01,  "strong_bear", 0.00, [0],       0),
 ]
