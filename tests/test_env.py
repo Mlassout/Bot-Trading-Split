@@ -48,7 +48,7 @@ def test_reset_returns_correct_shape():
     """reset() retourne une observation de la bonne shape."""
     env = make_env(window_size=20)
     obs, info = env.reset(seed=42)
-    expected_size = 20 * 5 + 3  # window * features + account_state
+    expected_size = 20 * 5 + 4  # window * features + account_state (position, unrealized, capital, volatility)
     assert obs.shape == (expected_size,), f"Shape attendue ({expected_size},), obtenue {obs.shape}"
     assert obs.dtype == np.float32
     print(f"[PASS] test_reset_returns_correct_shape — shape={obs.shape}")

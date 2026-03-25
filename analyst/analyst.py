@@ -235,13 +235,20 @@ class Analyst:
             return self._analyze_mock(headlines)
 
     def _parse_llm_response(self, raw_text: str, n_headlines: int) -> SentimentResult:
-        """Parse la reponse JSON du LLM."""
+        """Parse la reponse JSON du LLM (robuste aux LLMs qui ajoutent du texte)."""
         try:
-            # Extraire le JSON meme si le LLM a ajoute du texte autour
-            json_match = re.search(r'\{.*\}', raw_text, re.DOTALL)
-            if not json_match:
-                raise ValueError("Aucun JSON trouve dans la reponse.")
-            data = json.loads(json_match.group())
+            # Trouver tous les blocs JSON et prendre le premier valide
+            # Llama3 ajoute parfois du texte apres le JSON
+            data = None
+            for match in re.finditer(r'\{[^{}]*\}', raw_text, re.DOTALL):
+                try:
+                    data = json.loads(match.group())
+                    if "bias" in data or "score" in data:
+                        break
+                except json.JSONDecodeError:
+                    continue
+            if data is None:
+                raise ValueError("Aucun JSON valide trouve dans la reponse.")
 
             bias  = str(data.get("bias", "neutral")).lower()
             score = float(data.get("score", 0.0))

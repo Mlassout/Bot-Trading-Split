@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 import csv
 import logging
+from dotenv import load_dotenv
+load_dotenv()
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -43,7 +45,9 @@ from trader.risk_aware_env import RiskAwareTradingEnv
 from trader.trader_agent import TraderAgent
 from analyst.analyst import Analyst, AnalystMode, SentimentResult
 from structurer.structurer import Structurer
-from risk_manager.risk_manager import RiskConfig
+from risk_manager.risk_manager import RiskConfig, RiskDecision
+from notifications.discord_notifier import DiscordNotifier
+from news.news_provider import NewsProvider
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -104,6 +108,8 @@ class SessionConfig:
     risk_stop_loss: float = 0.02
     log_to_csv: bool = True
     verbose: bool = True
+    discord_webhook: Optional[str] = None   # None = lit DISCORD_WEBHOOK_URL de l'env
+    use_real_news: bool = True              # True = yfinance, False = headlines fictifs rotatifs
 
 
 @dataclass
@@ -190,12 +196,21 @@ class Orchestrator:
         self.analyst = Analyst(mode=mode)
         self.structurer = Structurer()
 
+        # Notificateur Discord + fournisseur de news
+        asset_name = Path(cfg.data_path).stem if cfg.data_path else "SIM"
+        self.discord = DiscordNotifier(
+            webhook_url=cfg.discord_webhook,
+            asset=asset_name,
+        )
+        self.news_provider = NewsProvider(asset=asset_name) if cfg.use_real_news else None
+
         # Etat de session
         self._current_sentiment = SentimentResult(
             bias="neutral", score=0.0, confidence=0.5,
             reasoning="Initialisation", headlines_used=0
         )
         self._current_params = self.structurer.translate(self._current_sentiment)
+        self._last_entry_price: float = 0.0
 
     # ------------------------------------------------------------------
     # Boucle principale
@@ -221,16 +236,25 @@ class Orchestrator:
             max_holding_steps=self._current_params.max_holding_steps,
         )
 
+        self.discord.session_start(
+            initial_capital=cfg.initial_capital,
+            model_path=cfg.model_path or "",
+        )
+
         done = False
         step = 0
         peak_value = cfg.initial_capital
+        prev_position = 0
 
         while not done:
             step += 1
 
             # --- Mise a jour sentiment (tous les N steps) ---
             if step % cfg.analyst_update_freq == 1:
-                headlines = self.headlines_provider(step)
+                if self.news_provider is not None:
+                    headlines = self.news_provider.get_headlines()
+                else:
+                    headlines = self.headlines_provider(step)
                 self._current_sentiment = self.analyst.analyze(headlines)
                 self._current_params = self.structurer.translate(self._current_sentiment)
                 self.env.update_structurer_params(
@@ -248,6 +272,50 @@ class Orchestrator:
             # --- Execution (Risk Manager integre dans l'env) ---
             obs, reward, terminated, truncated, info = self.env.step(action_trader)
             done = terminated or truncated
+
+            # --- Notifications Discord ---
+            action_exec = info.get("action_executed", action_trader)
+            risk_decision = info.get("risk_decision", "ALLOW")
+            curr_position = info["position"]
+            price = info["price"]
+
+            # BUY : on vient d'entrer en position
+            if curr_position == 1 and prev_position == 0 and action_exec == 1:
+                self._last_entry_price = price
+                self.discord.trade_buy(
+                    price=price,
+                    capital_used=cfg.initial_capital * self._current_params.position_size_factor,
+                    step=step,
+                )
+
+            # SELL : on vient de sortir d'une position
+            elif curr_position == 0 and prev_position == 1:
+                pnl = (price - self._last_entry_price) / (self._last_entry_price + 1e-8) * 100
+                realized = info["realized_pnl"]
+                self.discord.trade_sell(
+                    price=price,
+                    pnl=realized,
+                    pnl_pct=pnl,
+                    entry_price=self._last_entry_price,
+                    step=step,
+                )
+
+            # Risk Manager : HALT ou STOP-LOSS
+            if risk_decision == RiskDecision.BLOCK_HALT.value and prev_position == 0:
+                self.discord.risk_halt(
+                    reason=info.get("risk_reason", ""),
+                    drawdown_pct=info.get("drawdown_pct", 0.0) * 100,
+                    portfolio_value=info["portfolio_value"],
+                )
+            elif risk_decision == RiskDecision.BLOCK_SELL.value and prev_position == 1:
+                loss_pct = (price - self._last_entry_price) / (self._last_entry_price + 1e-8) * 100
+                self.discord.risk_stop_loss(
+                    price=price,
+                    entry_price=self._last_entry_price,
+                    loss_pct=loss_pct,
+                )
+
+            prev_position = curr_position
 
             # --- Tracking ---
             pv = info["portfolio_value"]
@@ -286,6 +354,14 @@ class Orchestrator:
         if cfg.log_to_csv:
             self._save_logs()
         self._print_report(metrics)
+
+        self.discord.session_end(
+            final_capital=metrics.get("final_portfolio_value", cfg.initial_capital),
+            initial_capital=cfg.initial_capital,
+            total_trades=metrics.get("total_trades", 0),
+            realized_pnl=metrics.get("realized_pnl", 0.0),
+        )
+
         return metrics
 
     # ------------------------------------------------------------------

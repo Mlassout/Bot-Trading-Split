@@ -51,7 +51,7 @@ def load_ohlcv(path: str | Path) -> pd.DataFrame:
 
     # Suppression des NaN et coherence OHLC
     df = df.dropna()
-    invalid = (df["low"] > df["high"]) | (df["close"] < 0) | (df["volume"] < 0)
+    invalid = (df["low"] > df["high"]) | (df["close"] <= 0) | (df["volume"] < 0)
     n_invalid = invalid.sum()
     if n_invalid > 0:
         print(f"[data_loader] Avertissement : {n_invalid} lignes OHLC invalides supprimees.")

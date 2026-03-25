@@ -5,100 +5,140 @@
 Architecture de trading algorithmique inspirée des grandes banques d'investissement.
 **Règle d'or : ne jamais passer à l'étape suivante tant que la précédente n'est pas 100% fonctionnelle.**
 
-## Architecture (5 micro-services)
+Idées intégrées depuis les meilleurs dépôts GitHub (FinRL, gym-anytrading, ElegantRL).
+
+## Architecture (multi-agents)
 
 ```
-Analyste (LLM) → Structureur → Trader (RL) → Risk Manager → Environnement
-                                                ↑
-                                          Gouvernance (Stress Test)
+NewsProvider (yfinance) → Analyste (LLM) → Structureur → paramètres de trading
+                                                               ↓
+                                              Orchestrateur (boucle principale)
+                                                    ↓              ↓
+                                            Trader (PPO RL)    DiscordNotifier
+                                                    ↓
+                                           RiskAwareTradingEnv
+                                            ↓               ↓
+                                       Risk Manager     TradingEnv
 ```
 
 | Module | Dossier | Rôle |
 |---|---|---|
-| Environnement | `environment/` | Gym custom OHLCV, reward dense mark-to-market |
-| Risk Manager | `risk_manager/` | Règles strictes : stop-loss, drawdown, perte journalière |
-| Trader | `trader/` | Agent PPO (Stable Baselines3) |
-| Analyste | `analyst/` | LLM sentiment macro (mock + API OpenAI-compatible) |
-| Structureur | `structureur/` | Traduit sentiment → paramètres de trading |
+| Environnement | `environment/` | Gym custom OHLCV, reward dense mark-to-market, log-norm |
+| Risk Manager | `risk_manager/` | Stop-loss, drawdown, perte journalière |
+| Trader | `trader/` | Agent PPO (Stable Baselines3), obs=107 dims |
+| Analyste | `analyst/` | LLM sentiment macro (Llama/Ollama ou mock) |
+| Structureur | `structurer/` | Traduit sentiment → position_size, allowed_actions |
+| Orchestrateur | `orchestrator/` | Boucle principale paper trading |
+| NewsProvider | `news/` | Vraies headlines financières via yfinance |
+| DiscordNotifier | `notifications/` | Notifications webhook Discord (trades, sessions) |
 | Gouvernance | `governance/` | Stress tests : flash crash, volatilité extrême |
-| Orchestrateur | `orchestrator/` | Boucle principale, paper trading |
-| Évaluation | `evaluation/` | Comparaison multi-checkpoints, graphiques |
+| Évaluation | `evaluation/` | Comparaison multi-checkpoints, métriques |
 
 ## Commandes principales
 
 ```bash
-# Entraînement sur 30 actifs réels
-python main.py train --data data/train --steps 1000000
+# Entraînement sur 30 actifs réels (obs=107, ~25 min)
+python main.py train --data data/train --steps 500000
 
-# Évaluation out-of-sample (2024-2026) sur tous les checkpoints
+# Évaluation out-of-sample sur tous les checkpoints
 python main.py evaluate --checkpoints models/checkpoints/ --test-data data/test/ --vecnorm models/trader_ppo_vecnorm.pkl
+
+# Paper trading — mode mock (rapide, sans LLM)
+python main.py paper --model models/best/best_model.zip --analyst mock
+
+# Paper trading — mode API (Llama via Ollama, vraies news yfinance)
+python main.py paper --model models/best/best_model.zip --analyst api
 
 # Génération des graphiques comparatifs
 python main.py compare
-
-# Paper trading avec le meilleur modèle
-python main.py paper --data data/test --model models/best/best_model.zip
-
-# Dashboard interactif
-python dashboard.py
 ```
 
-## Données
+## Espace d'observation (107 dimensions)
 
-### Train (2010/2018 → 2023-12-31) — `data/train/`
-30 actifs réels Yahoo Finance (daily) :
-- **Crypto (6)** : BTC, ETH, SOL, BNB, XRP, ADA
-- **Indices US (4)** : S&P500, Nasdaq, Dow, Russell 2000
-- **Indices monde (5)** : DAX, Nikkei, FTSE, Hang Seng, CAC 40
-- **Matières premières (5)** : Gold, Oil, Silver, Gas, Copper
-- **Forex (5)** : EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CHF
-- **Actions US (5)** : AAPL, MSFT, TSLA, NVDA, AMZN
+```
+TradingEnv (104 dims) :
+  - 20 bougies × 5 features OHLCV (log-normalisés par rapport au close actuel)
+  - position actuelle (0=flat, 1=long)
+  - PnL non-réalisé en % du capital initial
+  - capital disponible en % du capital initial
+  - volatilité rolling (std des log-rendements sur la fenêtre)
 
-### Test out-of-sample (2024-01-01 → 2026-03-24) — `data/test/`
-Mêmes 30 actifs, **jamais vus pendant l'entraînement**.
+RiskAwareTradingEnv ajoute +3 dims :
+  - risk_halted (0/1) : Risk Manager a bloqué le trading
+  - holding_steps normalisé (0→1 sur max_holding_steps=500)
+  - dernière action normalisée (0/1/2 → 0.0/0.5/1.0)
+```
+
+**CRITIQUE** : tout modèle entraîné avec obs=107 est incompatible avec un autre obs size.
+Les anciens modèles (obs=105) sont archivés dans `models/archive_obs105/` — ne pas utiliser.
+
+## Hyperparamètres PPO actuels
+
+| Param | Valeur | Pourquoi |
+|---|---|---|
+| gamma | 0.985 | Horizon court, adapté aux marchés financiers |
+| ent_coef | 0.03 | Exploration active (évite convergence prématurée) |
+| net_arch | dict(pi=[256,256], vf=[256,256]) | Réseaux actor/critic séparés |
+| activation_fn | Tanh | Plus stable que ReLU en RL |
+| learning_rate | linéaire 3e-4 → 1e-4 | Décroissance progressive |
+| n_steps | 4096 | Rollout long pour variance réduite |
+| batch_size | 128 | |
+| holding_penalty | 0.001 | Casse le comportement buy & hold |
+| max_holding_steps | 500 | Force la clôture des positions longues |
+| n_envs | 4 | Parallélisation |
 
 ## Reward Function (dense mark-to-market)
 
-Fichier : `environment/trading_env.py`
-
 ```
-reward = step_return - drawdown_penalty - inaction_penalty
+reward = step_return - drawdown_penalty - inaction_penalty - holding_penalty
 ```
 
-- `step_return` : variation mark-to-market du portefeuille / capital initial (signal dense à chaque bougie)
-- `drawdown_penalty` : pénalité proportionnelle au drawdown depuis le pic (× `drawdown_penalty_factor=2.0`)
-- `inaction_penalty` : pénalité si HOLD sans position ouverte (`0.0002` par step)
+- `step_return` : variation mark-to-market / capital initial (signal dense à chaque bougie)
+- `drawdown_penalty` : pénalité proportionnelle au drawdown depuis le pic (× 2.0)
+- `inaction_penalty=0.0002` : si HOLD sans position (pousse à trader)
+- `holding_penalty=0.001` : si HOLD avec position ouverte (pousse à clôturer)
 
-**Pourquoi cette reward ?** L'ancienne reward sparse (seulement au SELL) causait un comportement "hold forever" — le modèle divergeait après 180k steps.
+## Données
 
-## Résultats connus
+### Train (`data/train/`) — 30 actifs, ~96k bougies fusionnées
+- **Crypto (6)** : BTC, ETH, SOL, BNB, XRP, ADA
+- **Indices US (4)** : S&P500, Nasdaq, Dow, Russell 2000
+- **Indices monde (5)** : DAX, Nikkei, FTSE, Hang Seng, CAC 40
+- **Matières premières (4)** : Gold, Silver, Gas, Copper
+- **Forex (5)** : EUR/USD, GBP/USD, USD/JPY, AUD/USD, USD/CHF
+- **Actions US (6)** : AAPL, MSFT, TSLA, NVDA, AMZN, CLF
 
-### Run #1 — Données synthétiques (GBM)
-- Reward très volatile, peu représentatif du marché réel
+Prix normalisés à 100 au départ de chaque actif (`load_multi_ohlcv`).
 
-### Run #2 — 6 actifs réels (BTC, ETH, S&P500, Nasdaq, Gold, EUR/USD)
-- Meilleure reward à 30k steps (+841), puis divergence
+### Test out-of-sample (`data/test/`) — mêmes 30 actifs, jamais vus en entraînement
 
-### Run #3 — 30 actifs réels, reward sparse (1M steps)
-- **Best model : 50k–100k steps** (BTC +62%, NVDA +38%, Gold +76%)
-- **Divergence après 180k steps** : reward chute à -856, épisodes 4× plus longs
-- Cause : reward sparse → comportement "hold forever" sur 96k bougies
-
-### Run #4 — 30 actifs, reward dense mark-to-market (EN COURS)
-- Objectif : éliminer la divergence, stabiliser l'apprentissage
-
-## Modèles sauvegardés
+## Modèles
 
 ```
 models/
-├── best/best_model.zip         ← meilleur checkpoint évalué (Run #3 : ~50k steps)
-├── checkpoints/                ← checkpoints tous les 50k steps
-│   ├── trader_ppo_50000_steps.zip
-│   ├── trader_ppo_100000_steps.zip
-│   └── ...
-├── trader_ppo.zip              ← modèle final (souvent sous-optimal vs best)
-└── trader_ppo_vecnorm.pkl      ← normalisation VecNormalize (obligatoire pour l'inférence)
+├── best/best_model.zip         ← meilleur checkpoint selon EvalCallback
+├── checkpoints/                ← sauvegarde tous les 50k steps
+├── trader_ppo.zip              ← modèle final (run courant)
+├── trader_ppo_vecnorm.pkl      ← stats VecNormalize (obligatoire pour l'inférence)
+└── archive_obs105/             ← anciens modèles obs=105 (INCOMPATIBLES, ne pas utiliser)
 ```
+
+**CRITIQUE** : toujours charger `trader_ppo_vecnorm.pkl` avec le modèle correspondant.
+Un modèle sans son VecNormalize associé aura des observations mal normalisées → 0 trades.
+
+## Configuration (.env)
+
+```env
+# Analyste LLM (Ollama + Llama local)
+LLM_API_KEY=ollama
+LLM_API_BASE=http://localhost:11434/v1
+LLM_MODEL=llama3.2
+
+# Notifications Discord
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
+```
+
+Pour utiliser le mode API : `ollama serve` doit tourner, et `ollama pull llama3.2` doit être fait.
 
 ## Risk Manager — Règles actuelles
 
@@ -107,42 +147,36 @@ models/
 | Stop-loss trade | -2% |
 | Perte journalière max | -2% |
 | Drawdown max depuis pic | -10% |
-| Taille position max | 95% du capital |
 
-## État d'avancement des étapes
+## Historique des runs d'entraînement
 
-- [x] **Étape 1** : Environnement Gym (TradingEnv, reward dense)
-- [x] **Étape 2** : Trader PPO + Risk Manager (opérationnel)
-- [x] **Étape 3** : Analyste (mode mock) + Structureur (opérationnel)
-- [x] **Étape 4** : Gouvernance / Stress Test (opérationnel)
-- [x] **Étape 5** : Orchestrateur + Paper Trading (opérationnel)
-- [ ] **Optimisation** : reward dense → stabiliser la convergence après 180k steps
-- [ ] **Prochaine étape** : connecter un vrai courtier en mode paper (ex: Alpaca, IBKR)
+| Run | Obs | Steps | Résultat |
+|---|---|---|---|
+| #1 | 103 | 200k | Données synthétiques, peu représentatif |
+| #2 | 103 | ~200k | 6 actifs réels, divergence rapide |
+| #3 | 103→105 | 1M | Reward sparse → divergence à 180k steps, best à 50-100k |
+| #4 | 105 | 950k | Reward dense, mais code changé en cours → archivé |
+| #5 | **107** | En cours | Log-norm + volatilité + last_action + hyper améliorés |
 
-## Stack technique
+## État d'avancement
 
-```
-Python 3.11
-gymnasium>=0.29         # environnement RL
-stable-baselines3>=2.3  # algorithme PPO
-torch>=2.2              # backend deep learning
-yfinance>=1.2           # données réelles
-openai>=1.0             # API LLM Analyste (compatible Mistral)
-pandas, numpy, matplotlib
-python-dotenv           # gestion clés API (.env)
-```
-
-## Variables d'environnement (.env)
-
-```env
-OPENAI_API_KEY=...      # ou clé Mistral pour l'Analyste
-OPENAI_BASE_URL=...     # ex: https://api.mistral.ai/v1 pour Mistral
-```
+- [x] Environnement Gym (TradingEnv, reward dense mark-to-market)
+- [x] Trader PPO + Risk Manager
+- [x] Analyste LLM (Llama/Ollama) + Structureur
+- [x] Gouvernance / Stress Test
+- [x] Orchestrateur + Paper Trading
+- [x] Notifications Discord
+- [x] Vraies news financières (yfinance)
+- [x] Améliorations FinRL/ElegantRL (log-norm, volatilité, last_action, hypers)
+- [ ] Entraînement Run #5 (obs=107) — à lancer
+- [ ] Évaluation Run #5 et comparaison avec runs précédents
+- [ ] Connexion courtier réel paper trading (Alpaca, IBKR)
 
 ## Points d'attention
 
-- **Ne jamais utiliser `models/trader_ppo.zip` directement** : c'est le modèle final souvent dégradé. Toujours préférer `models/best/best_model.zip`.
-- **VecNormalize obligatoire** : charger `trader_ppo_vecnorm.pkl` avec le modèle, sinon l'observation est mal normalisée.
-- **Obs space** : `window_size=20` bougies × 5 features + 4 variables de compte = **104 features**. Tout changement de `window_size` invalide les modèles existants.
-- **Logs de session** : chaque paper trading génère un CSV dans `logs/session_YYYYMMDD_HHMMSS.csv`.
-- **Graphiques d'évaluation** : générés dans `evaluation/plots/`.
+- **Exécution** : utiliser le Python Windows `C:\Users\malas\AppData\Local\Programs\Python\Python312\python.exe` (les packages SB3/torch sont installés là, pas dans WSL)
+- **Unicode WSL** : préfixer avec `PYTHONIOENCODING=utf-8` si caractères spéciaux dans le terminal
+- **Git push** : faire depuis PowerShell Windows (WSL ne peut pas s'authentifier sur GitHub)
+- **obs size** : changer `window_size` ou les features invalide TOUS les modèles existants
+- **VecNormalize** : modèle + vecnorm doivent toujours être du même run d'entraînement
+- **NaN guard** : `_get_observation()` applique `nan_to_num` en sortie — ne pas retirer

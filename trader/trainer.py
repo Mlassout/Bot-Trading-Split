@@ -86,11 +86,12 @@ def make_env(
             initial_capital=initial_capital,
             window_size=window_size,
             transaction_cost=0.001,
-            holding_penalty=0.0001,
+            holding_penalty=0.001,
         )
         env = RiskAwareTradingEnv(
             env=base_env,
             risk_config=risk_config or RiskConfig(),
+            max_holding_steps=500,   # laisse les tendances longues se developper
         )
         env = Monitor(env)
         return env
@@ -186,21 +187,30 @@ def train(
     )
     metrics_callback = TradingMetricsCallback(verbose=1)
 
+    # Learning rate schedule : decroit lineairement de 3e-4 a 1e-4
+    def lr_schedule(progress: float) -> float:
+        """progress : 1.0 au debut, 0.0 a la fin."""
+        return 1e-4 + progress * (3e-4 - 1e-4)
+
     # Modele PPO
     model = PPO(
         policy="MlpPolicy",
         env=train_env,
-        learning_rate=3e-4,
-        n_steps=2048,
-        batch_size=64,
+        learning_rate=lr_schedule,
+        n_steps=4096,
+        batch_size=128,
         n_epochs=10,
-        gamma=0.99,
+        gamma=0.985,        # horizon plus court, plus adapte aux marches financiers
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,        # encourage l'exploration
+        ent_coef=0.03,
         vf_coef=0.5,
         max_grad_norm=0.5,
-        policy_kwargs={"net_arch": [128, 128]},
+        policy_kwargs={
+            # Reseaux actor (pi) et critic (vf) separes : evite que l'un perturbe l'autre
+            "net_arch": dict(pi=[256, 256], vf=[256, 256]),
+            "activation_fn": __import__("torch").nn.Tanh,  # Tanh prefere a ReLU en RL
+        },
         verbose=1,
         seed=seed,
     )

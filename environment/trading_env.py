@@ -78,7 +78,7 @@ class TradingEnv(gym.Env):
         # Action : 0=HOLD, 1=BUY, 2=SELL
         self.action_space = spaces.Discrete(3)
 
-        # Observation : fenetre OHLCV + 4 variables de compte (position, unrealized, capital, drawdown)
+        # Observation : fenetre OHLCV + 4 variables de compte (position, unrealized, capital, volatility)
         obs_size = self.window_size * self._n_features + 4
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_size,), dtype=np.float32
@@ -178,10 +178,13 @@ class TradingEnv(gym.Env):
         drawdown = (curr_value - self._peak_value) / self._peak_value  # negatif ou 0
         drawdown_penalty = abs(min(drawdown, 0)) * self.drawdown_penalty_factor / len(self._prices)
 
-        # 4. Penalite d'inaction : si HOLD sans position, pousse a prendre des decisions
+        # 4. Penalites d'inaction :
+        #    - HOLD sans position : pousse a entrer en trade
+        #    - HOLD avec position ouverte : pousse a sortir (evite le buy & hold indefini)
         inaction_penalty = self.inaction_penalty if (action == 0 and self._position == 0) else 0.0
+        holding_penalty = self.holding_penalty if (action == 0 and self._position == 1) else 0.0
 
-        reward = step_return - drawdown_penalty - inaction_penalty
+        reward = step_return - drawdown_penalty - inaction_penalty - holding_penalty
 
         self._prev_portfolio_value = curr_value
 
@@ -213,29 +216,34 @@ class TradingEnv(gym.Env):
         """Construit le vecteur d'observation normalise."""
         window = self._ohlcv[self._current_step - self.window_size : self._current_step]
 
-        # Normalisation par rapport au prix de cloture actuel
-        ref_price = window[-1, 3]  # close de la derniere bougie
+        ref_price = window[-1, 3] + 1e-8   # close de la derniere bougie
         ref_volume = window[:, 4].mean() + 1e-8
 
         normalized = window.copy()
-        normalized[:, :4] = normalized[:, :4] / (ref_price + 1e-8)  # prix normalises
-        normalized[:, 4] = normalized[:, 4] / ref_volume             # volume normalise
+        # Log-normalisation des prix (meilleure stationnarite que la division simple)
+        normalized[:, :4] = np.log(normalized[:, :4] / ref_price + 1e-8)
+        normalized[:, 4] = normalized[:, 4] / ref_volume
 
         ohlcv_flat = normalized.flatten()
+
+        # Volatilite rolling (proxy turbulence) : std des log-rendements sur la fenetre
+        log_returns = np.diff(np.log(window[:, 3] + 1e-8))
+        rolling_vol = float(np.clip(log_returns.std(), 0.0, 0.5)) if len(log_returns) > 1 else 0.0
 
         # Variables de compte
         current_price = self._prices[self._current_step - 1]
         portfolio_value = self._get_portfolio_value(current_price)
         unrealized_pct = self._get_unrealized_pnl(current_price) / self.initial_capital
         capital_pct = self._capital / self.initial_capital
-        drawdown_pct = (portfolio_value - self._peak_value) / (self._peak_value + 1e-8)
 
         account_state = np.array(
-            [float(self._position), unrealized_pct, capital_pct, drawdown_pct],
+            [float(self._position), unrealized_pct, capital_pct, rolling_vol],
             dtype=np.float32,
         )
 
-        return np.concatenate([ohlcv_flat, account_state])
+        obs = np.concatenate([ohlcv_flat, account_state])
+        # Securite : eliminer tout NaN/Inf residuel avant d'envoyer au reseau
+        return np.nan_to_num(obs, nan=0.0, posinf=5.0, neginf=-5.0).astype(np.float32)
 
     def _get_unrealized_pnl(self, current_price: float) -> float:
         if self._position == 0:

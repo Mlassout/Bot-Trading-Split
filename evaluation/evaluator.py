@@ -94,21 +94,20 @@ def evaluate_on_asset(
         initial_capital=initial_capital,
         window_size=window_size,
         transaction_cost=0.001,
-        holding_penalty=0.0001,
+        holding_penalty=0.001,
     )
     env = RiskAwareTradingEnv(
         env=base_env,
         risk_config=risk_config or RiskConfig(),
+        max_holding_steps=500,
     )
 
-    # VecNormalize pour que les observations soient dans le meme espace que l'entrainement
+    # VecNormalize uniquement si un fichier de stats est fourni
     vec_env = DummyVecEnv([lambda: env])
     if vecnorm_path and Path(vecnorm_path).exists():
         vec_env = VecNormalize.load(vecnorm_path, vec_env)
         vec_env.training = False
         vec_env.norm_reward = False
-    else:
-        vec_env = VecNormalize(vec_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False)
 
     obs = vec_env.reset()
     portfolio_values = [initial_capital]

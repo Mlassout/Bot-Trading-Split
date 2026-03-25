@@ -63,11 +63,12 @@ class RiskAwareTradingEnv(gym.Wrapper):
         self._holding_steps: int = 0
         self._last_portfolio_value: float = env.initial_capital
         self._risk_overrides: int = 0
+        self._last_action: int = 0
 
-        # Ajouter 2 dimensions a l'observation : [risk_halted, holding_steps_norm]
+        # Ajouter 3 dimensions a l'observation : [risk_halted, holding_steps_norm, last_action]
         base_shape = env.observation_space.shape[0]
         self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(base_shape + 2,), dtype=np.float32
+            low=-np.inf, high=np.inf, shape=(base_shape + 3,), dtype=np.float32
         )
 
     # ------------------------------------------------------------------
@@ -80,6 +81,7 @@ class RiskAwareTradingEnv(gym.Wrapper):
         self._holding_steps = 0
         self._last_portfolio_value = self.env.initial_capital
         self._risk_overrides = 0
+        self._last_action = 0
         return self._augment_obs(obs, info), info
 
     def step(self, action: int):
@@ -144,6 +146,8 @@ class RiskAwareTradingEnv(gym.Wrapper):
             self._holding_steps = 0
 
         reward += risk_penalty
+        info["action_executed"] = action
+        self._last_action = action
         info["risk_decision"] = risk_state.decision.value
         info["risk_reason"] = risk_state.reason
         info["risk_overrides"] = self._risk_overrides
@@ -178,5 +182,6 @@ class RiskAwareTradingEnv(gym.Wrapper):
     def _augment_obs(self, obs: np.ndarray, info: dict) -> np.ndarray:
         """Ajoute les dimensions de risque a l'observation de base."""
         risk_halted = float(self.risk_manager.is_halted)
-        holding_norm = (self._holding_steps / (self.max_holding_steps or 100)) if self.max_holding_steps else 0.0
-        return np.append(obs, [risk_halted, holding_norm]).astype(np.float32)
+        holding_norm = (self._holding_steps / (self.max_holding_steps or 500)) if self.max_holding_steps else 0.0
+        last_action_norm = self._last_action / 2.0  # normalise entre 0 et 1
+        return np.append(obs, [risk_halted, holding_norm, last_action_norm]).astype(np.float32)
